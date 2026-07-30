@@ -408,298 +408,153 @@ This approach reduces manual deployment work, minimizes configuration drift, and
 
 ---
 
-## Deployment issues encountered and how they were resolved
+## Deployment issues and resolutions
 
-The application was deployed incrementally on an AWS EC2 instance. Most of the work involved debugging infrastructure, networking, and deployment automation rather than application code. Below are the major issues encountered and the concrete fixes applied during the production rollout.
+During the production rollout to an AWS EC2 host the team ran into a number of operational problems. The list below documents the issue, root cause, the fix we applied, and the verification that confirmed the fix. These notes are written for operators who will reproduce, maintain, or troubleshoot the environment.
 
-### 1. Docker Compose configuration failure
+### Summary
+Most issues were infrastructure- and ops-related (YAML, networking, proxying, certs, CI secrets, and local state). The fixes are small and targeted: correct Compose YAML, use Docker service discovery, configure NGINX for WebSocket upgrades, persist state to Redis, and ensure CI/infra secrets map to the current public endpoint.
 
-Problem
+---
 
-The application failed to start with the error:
-
-```
-services.build must be a mapping
-```
-
-Root cause
-
-The `docker-compose.yml` file had incorrect YAML indentation: the `build` directive was placed at the wrong level so Docker Compose could not parse the service definition.
-
-Fix
-
-Restructure the Compose file with the correct indentation:
-
+### 1) Docker Compose configuration failure
+- Problem: Compose failed with `services.build must be a mapping`.
+- Root cause: Incorrect YAML/indentation — `build` was at the wrong level.
+- Fix: Fix the Compose file structure so `build` is under the `backend` service.
 ```yaml
 services:
   backend:
     build: .
 ```
-
-Result
-
-Docker Compose successfully built the backend image and started all containers.
+- Result: Compose parses and builds images successfully.
 
 ---
 
-### 2. NGINX served the default page instead of the application
-
-Problem
-
-Accessing the server displayed NGINX's default welcome page rather than the chat application.
-
-Root cause
-
-The `frontend` directory was not mounted into the NGINX container.
-
-Fix
-
-Mount the frontend as a read-only volume:
-
+### 2) NGINX served the default page instead of the application
+- Problem: Browser showed NGINX default page.
+- Root cause: `frontend` directory not mounted into NGINX.
+- Fix: Mount frontend as read-only volume:
 ```yaml
 volumes:
   - ./frontend:/usr/share/nginx/html:ro
 ```
-
-Result
-
-NGINX began serving the application frontend correctly.
+- Result: NGINX serves the application frontend.
 
 ---
 
-### 3. WebSocket connections failed through NGINX
-
-Problem
-
-The frontend loaded, but real-time messaging failed; clients continuously reported `Disconnected`.
-
-Root cause
-
-NGINX was proxying WebSocket requests as regular HTTP and was not forwarding the required upgrade headers.
-
-Fix
-
-Update the reverse proxy configuration to support WebSocket upgrade and increase timeouts:
-
+### 3) WebSocket connections failed through NGINX
+- Problem: Real-time messaging failed; clients disconnected.
+- Root cause: NGINX proxied WebSocket requests as plain HTTP and did not forward upgrade headers or use HTTP/1.1.
+- Fix: Configure proxy upgrade and long timeouts:
 ```nginx
 proxy_http_version 1.1;
 proxy_set_header Upgrade $http_upgrade;
 proxy_set_header Connection "upgrade";
 proxy_read_timeout 86400s;
+proxy_send_timeout 86400s;
 ```
-
-Result
-
-Persistent WebSocket connections were successfully established through NGINX.
+- Result: Persistent wss:// connections through NGINX work reliably.
 
 ---
 
-### 4. NGINX could not communicate with the backend container
-
-Problem
-
-NGINX returned connection errors while attempting to proxy requests to the backend.
-
-Root cause
-
-The proxy used `localhost:8000`; inside the NGINX container, `localhost` refers to the container itself. Containers must communicate using Compose service names via Docker DNS.
-
-Fix
-
-Point the proxy to the service name:
-
+### 4) NGINX could not communicate with the backend container
+- Problem: Connection errors when proxying to backend.
+- Root cause: `proxy_pass` used `localhost:8000` — inside the nginx container `localhost` is nginx itself.
+- Fix: Use Docker Compose service name (Docker DNS):
 ```nginx
 proxy_pass http://backend:8000/ws;
 ```
-
-Result
-
-NGINX successfully routed WebSocket traffic to the FastAPI container.
+- Result: NGINX routes requests to the FastAPI container successfully.
 
 ---
 
-### 5. Redis was not storing chat history
-
-Problem
-
-Messages disappeared after reconnecting, and online user tracking was inconsistent.
-
-Root cause
-
-Application state was kept only in memory.
-
-Fix
-
-Integrate Redis as a persistence layer:
-
-* Store messages in `chat_history`.
-* Track online users in `online_users`.
-* Send recent chat history to new clients on connect.
-* Trim history to the most recent 50 messages.
-
-Result
-
-Chat history persisted across reconnects and presence tracking stabilized.
+### 5) Redis was not persisting chat history
+- Problem: Message history lost on reconnect; presence unstable.
+- Root cause: State was kept only in process memory.
+- Fix: Integrate Redis for persistence:
+  - store messages in `chat_history` (list)
+  - track online users in `online_users` (set)
+  - send recent history to new clients on connect
+  - trim history to last 50 messages
+- Result: History and presence are durable and consistent.
 
 ---
 
-### 6. Docker permission denied
-
-Problem
-
-Docker commands failed with permission errors for the deployment user.
-
-Root cause
-
-The deployment user was not in the `docker` group.
-
-Fix
-
-Add the user to the docker group and refresh group membership:
-
+### 6) Docker permission denied on deployment host
+- Problem: Docker commands required `sudo`.
+- Root cause: Deployment user not in `docker` group.
+- Fix:
 ```bash
 sudo usermod -aG docker $USER
 newgrp docker
 ```
-
-Result
-
-Docker commands executed without `sudo`.
+- Result: Docker commands run without sudo for the deployment user.
 
 ---
 
-### 7. SSH connection failed after assigning an Elastic IP
-
-Problem
-
-Existing SSH sessions dropped after assigning an Elastic IP.
-
-Root cause
-
-The instance's public endpoint changed; clients were still connecting to the previous address.
-
-Fix
-
-Update SSH client configuration to use the Elastic IP (or the DNS name mapped to it).
-
-Result
-
-SSH connectivity was restored and stable.
+### 7) SSH connection dropped after assigning Elastic IP
+- Problem: SSH stopped working after Elastic IP assignment.
+- Root cause: The instance’s public endpoint changed; local SSH config used old address.
+- Fix: Update SSH config / host to use the Elastic IP or DNS name mapped to it.
+- Result: SSH connectivity restored.
 
 ---
 
-### 8. GitHub Actions deployment failed
-
-Problem
-
-The deployment pipeline failed with a network timeout when attempting to SSH:
-
+### 8) GitHub Actions deployment failed (timeout)
+- Problem: `dial tcp ***:22: i/o timeout` from Actions.
+- Root cause: Actions `HOST` secret referenced old IP (not the Elastic IP).
+- Fix: Update repository secret with the current Elastic IP.
 ```
-dial tcp ***:22: i/o timeout
-```
-
-Root cause
-
-The Actions `HOST` secret contained the old IP address rather than the Elastic IP.
-
-Fix
-
-Update the repository secret with the Elastic IP:
-
-```text
 HOST=13.62.142.178
 ```
-
-Result
-
-GitHub Actions connected to the server and completed the deployment successfully.
+- Result: Actions can SSH into the host and deploy.
 
 ---
 
-### 9. HTTPS configuration for production
-
-Problem
-
-The application was initially available only over HTTP.
-
-Root cause
-
-SSL certificates were not configured on the server.
-
-Fix
-
-Point a domain to the Elastic IP, generate certificates with Certbot, and configure NGINX for HTTPS and secure WebSocket proxying.
-
-Result
-
-The application served securely at `https://whiteobah.space` and WebSocket connections used `wss://`.
+### 9) HTTP-only site (no SSL)
+- Problem: Production served only over HTTP.
+- Root cause: Certificates not provisioned/configured.
+- Fix: Point domain to Elastic IP, obtain Let's Encrypt certs with Certbot, and configure nginx for HTTPS and secure WebSocket proxying.
+- Result: App available at `https://whiteobah.space` and wss:// connections succeed.
 
 ---
 
-### 10. Terraform provider binary exceeded GitHub's size limit
-
-Problem
-
-Pushes were rejected because the Terraform provider binary in `.terraform/` exceeded GitHub's 100 MB limit.
-
-Root cause
-
-The `.terraform/` cache directory was committed to the repository accidentally.
-
-Fix
-
-Remove the cache from git tracking and add appropriate ignores:
-
+### 10) Terraform provider binary pushed (repo size limit)
+- Problem: Pushes rejected — file(s) exceeded GitHub’s 100 MB limit.
+- Root cause: `.terraform/` was committed.
+- Fix:
 ```bash
 git rm -r --cached terraform/.terraform
 ```
-
 Add to `.gitignore`:
-
 ```
 terraform/.terraform/
 *.tfstate
 *.tfstate.*
 ```
-
-Result
-
-Repository pushes succeeded and the repo became portable.
+- Result: Repository pushes succeed; repo is portable.
 
 ---
 
-### 11. Repository portability for reviewers
-
-Problem
-
-The HTTPS configuration depended on production-only SSL certificates, preventing reviewers from running the app locally.
-
-Root cause
-
-Production-specific NGINX configuration was kept in the default configuration file.
-
-Fix
-
-Split configuration into:
-
-* `nginx.conf` — HTTP configuration for local reviewers
-* `nginx-ssl.conf` — HTTPS configuration for production
-
-Provide a `docker-compose.prod.yml` override that mounts `/etc/letsencrypt` into the nginx container only in production.
-
-Result
-
-Reviewers can run `docker compose up -d --build` locally without certificates, while the production server uses full HTTPS.
+### 11) Reviewer portability: HTTPS config blocked local runs
+- Problem: Local reviewers could not start nginx because config referenced server-only certs.
+- Root cause: Production NGINX config used by default.
+- Fix: Split configuration:
+  - `nginx.conf` — HTTP-only (local / reviewer)
+  - `nginx-ssl.conf` — HTTPS (production)
+  - Add `docker-compose.prod.yml` override to mount `/etc/letsencrypt` only in production
+- Result: Reviewers run `docker compose up -d --build` without certificates; production still uses full HTTPS.
 
 ---
 
 ## Key deployment lessons
+- Always use Compose service names for inter-container comms — do not use `localhost`.
+- NGINX must explicitly support WebSocket upgrades (HTTP/1.1, Upgrade/Connection headers).
+- Keep application state out of process memory for multi-instance or container restarts — Redis is the simplest durable option here.
+- Automate endpoint & secret updates (Elastic IP changes, DNS updates) as part of the infra pipeline to avoid manual drift.
+- Keep production-only config and secrets out of the default repo configuration; provide local-safe defaults and a clear override path.
 
-The primary failures were related to container networking, reverse proxy configuration, deployment automation, and infrastructure configuration rather than application logic. Final state:
-
-* Docker service discovery (use service names, not `localhost`) is essential for inter-container communication.
-* NGINX must be configured to properly upgrade and proxy WebSocket connections.
-* Redis provides durable, shared application state for history and presence.
-* GitHub Actions and Terraform provide reproducible, automated deployment and infrastructure provisioning.
-
-These lessons are captured in the repository and the operational runbook above to help future reviewers and operators reproduce and maintain the environment.
+## Recommended follow-ups
+- Add a lightweight GitHub Actions workflow that lint/builds and validates `docker compose up` in CI (no deploy stage) to catch config regressions early.
+- Add a small healthcheck endpoint and Docker Compose `healthcheck` for the backend so orchestrators can detect failure quickly.
+- Store deployment host and SSH keys in secrets manager and add a pipeline step that validates SSH reachability before executing the deploy steps.
