@@ -1,156 +1,14 @@
 # Deployment guide
 
-This repository is structured to support both **local development** and **production deployment**. The application stack is containerized with Docker Compose, fronted by NGINX, and deployed to an AWS EC2 instance with an Elastic IP. Production deployments are performed automatically through GitHub Actions, while Terraform is used to provision infrastructure reproducibly.
+This repository is structured to support both **local development** and **production deployment**. The application stack is containerized with Docker Compose, fronted by NGINX, and deployed to an AWS [...]
 
 The deployment process was designed with three goals:
 
 * **repeatability** – a fresh server can be provisioned and deployed consistently,
+
 * **automation** – production deployments require no manual intervention,
+
 * **operational safety** – configuration is separated between local and production environments.
-
----
-
-## Quick project overview
-
-- Project: Real-Time Chat App (FastAPI backend, static frontend served by NGINX).
-- Purpose: Demonstrate a small, containerized real-time WebSocket application with a deployable Compose stack and production-focused deployment docs.
-- Who this README is for: engineers onboarding to operate or review the deployment (assumes Docker familiarity).
-
----
-
-## Architecture diagram
-
-ASCII overview (single-host, Docker Compose):
-
-
-Browser (clients)
-    |
-    |  HTTPS (443) / WSS ->
-    v
-Public Internet
-    |
-    v
-EC2 Instance (Docker Engine)
-  ┌─────────────────────────────────────────────────────────┐
-  │  docker-compose network (default)                       │
-  │                                                         │
-  │  ┌────────────┐      ┌──────────────┐    ┌────────────┐ │
-  │  │ chat-nginx │ <--> │ chat-backend │ <--│  chat-redis│ │
-  │  │ (proxy)    │      │ (FastAPI)    │    │ (Redis)    │ │
-  │  └────────────┘      └──────────────┘    └────────────┘ │
-  │            │
-  │            └─> netdata (monitoring, optional)
-  └─────────────────────────────────────────────────────────┘
-
-Notes:
-- NGINX terminates TLS, serves static frontend, and proxies `/ws` to the backend over Docker DNS (`backend:8000`).
-- Redis provides shared state (chat history and presence).
-- Netdata (optional) exposes host/container metrics on port 19999.
-
----
-
-## How Docker containers are set up
-
-Files that control container behavior:
-- `Dockerfile` — builds the backend image from `python:3.11-slim` and runs Uvicorn.
-- `docker-compose.yml` — primary Compose file (local/reviewer profile).
-- `docker-compose.prod.yml` — production overrides (cert mounts, SSL nginx configuration).
-- `nginx.conf` / `nginx-ssl.conf` — nginx runtime configuration for HTTP and HTTPS.
-
-Services (compose):
-- backend (build: .) — FastAPI app (Uvicorn), listens on port 8000 inside container.
-- nginx (image: nginx:alpine) — serves static files and proxies requests to backend.
-- redis (image: redis:7-alpine) — ephemeral key-value store for chat history & presence.
-- netdata (optional) — monitoring agent exposing metrics on host port 19999.
-
-Operational details:
-- Backend runs with `--host 0.0.0.0` so it is reachable from other containers.
-- `expose:` is used for internal-only ports; `ports:` publishes host-facing ports (nginx: 80/443).
-- Frontend static files are mounted into the nginx image under `/usr/share/nginx/html`.
-
----
-
-## How Docker networking works (Compose)
-
-- Docker Compose creates a default bridge network for the project. Services can resolve each other by service name (DNS) — e.g. `backend` resolves to the backend container IP.
-- Use `expose:` to make a port accessible to other containers on the same network without binding it to the host.
-- Use `ports:` on the edge service (nginx) to allow external access.
-
-Common pitfalls:
-- Do NOT use `localhost` in `proxy_pass` inside nginx — `localhost` refers to the nginx container itself. Use `backend:8000` to reach the backend.
-
----
-
-## How NGINX reverse proxy works (in this project)
-
-- NGINX is the public-facing entry point. Primary responsibilities:
-  - Serve static frontend files (SPA) from `/usr/share/nginx/html`.
-  - Redirect HTTP -> HTTPS in production.
-  - Terminate TLS using Let's Encrypt certificates (when present).
-  - Proxy API and WebSocket connections to the backend.
-
-Important configuration points (see `nginx.conf` / `nginx-ssl.conf`):
-- `try_files $uri $uri/ /index.html;` for SPA routing.
-- Proxying to backend using Compose service name: `proxy_pass http://backend:8000;`.
-- Preserve client information with headers:
-  - `proxy_set_header Host $host;`
-  - `proxy_set_header X-Real-IP $remote_addr;`
-  - `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
-  - `proxy_set_header X-Forwarded-Proto $scheme;`
-
-SSL notes:
-- Production nginx expects certificates at `/etc/letsencrypt/live/<domain>/fullchain.pem` and `privkey.pem` (mounted from the host).
-- If certificates are absent, nginx will fail to start. Use the local `nginx.conf` (HTTP-only) for reviewer workflows.
-
----
-
-## How WebSocket works through NGINX
-
-Flow:
-1. Client opens a `ws://` or `wss://` connection to `/ws` on nginx.
-2. NGINX converts the client HTTP Upgrade request into a proxied WebSocket connection to the backend.
-
-Minimum nginx settings required for WebSocket proxying:
-```nginx
-proxy_http_version 1.1;
-proxy_set_header Upgrade $http_upgrade;
-proxy_set_header Connection "upgrade";
-proxy_set_header Host $host;
-proxy_read_timeout 86400s;
-proxy_send_timeout 86400s;
-```
-
-Key notes:
-- HTTP/1.1 is required for the `Upgrade` handshake.
-- Forwarding the `Upgrade` and `Connection` headers is mandatory so the backend sees the WebSocket handshake.
-- Use Docker service names in `proxy_pass` (e.g. `http://backend:8000/ws`).
-
----
-
-## How CI/CD pipeline works
-
-Current approach (recommended production workflow):
-- CI (PRs/pushes): run linting, unit tests, and a build verification step that builds the backend image. This prevents regressions in configuration.
-- CD (main branch): GitHub Actions connects to the production host via SSH and runs a deterministic deployment script that pulls the latest repo, rebuilds images, and restarts the stack.
-
-Example deploy sequence (run on host via Actions/SSH):
-```bash
-cd ~/devops
-git pull origin main
-docker compose down
-docker compose up --build -d
-docker image prune -f
-```
-
-Secrets required (set in repository secrets):
-- SSH_PRIVATE_KEY — private key for Actions to SSH into host
-- DEPLOY_USER — remote user (e.g. ubuntu)
-- DEPLOY_HOST — Elastic IP or DNS
-
-Recommended improvements:
-- Add a pre-deploy check in Actions that verifies SSH reachability.
-- Push built images to a registry and perform pull-based deploys for faster rollbacks.
-- Add a deployment tag and release notes in the workflow for auditability.
 
 ---
 
@@ -163,13 +21,121 @@ Two deployment profiles are maintained in the repository.
 | Local / Reviewer | `docker-compose.yml` + `nginx.conf`                                 |
 | Production       | `docker-compose.yml` + `docker-compose.prod.yml` + `nginx-ssl.conf` |
 
-Local profile is intentionally permissive (HTTP) so reviewers can run the stack without certs.
+The local configuration serves the application over HTTP and can be started without SSL certificates. The production configuration enables HTTPS using Let’s Encrypt and mounts the certificate direct[...]
+
+This separation allows reviewers to run the application immediately while keeping production-specific configuration isolated from the default deployment.
 
 ---
 
-## Deployment verification & operational runbook
+## Prerequisites
 
-(omitted here — see the sections below: "Deployment verification" and "Operational runbook")
+### Local deployment
+
+* Docker Engine
+
+* Docker Compose
+
+* Git
+
+### Production deployment
+
+* Ubuntu 24.04 EC2 instance
+
+* Docker Engine
+
+* Docker Compose
+
+* Git
+
+* A registered domain pointing to the EC2 Elastic IP
+
+* Let’s Encrypt certificates
+
+* GitHub Actions repository secrets configured for deployment
+
+---
+
+## Repository structure
+
+```
+devops/
+├── app/
+├── frontend/
+├── terraform/
+├── .github/workflows/
+├── Dockerfile
+├── docker-compose.yml
+├── docker-compose.prod.yml
+├── nginx.conf
+├── nginx-ssl.conf
+└── README.md
+```
+
+---
+
+## Local deployment
+
+Clone the repository and start the application.
+
+```
+git clone https://github.com/gochewhite/devops.git
+cd devops
+docker compose up -d --build
+```
+
+This command builds the FastAPI image, creates the Docker network, starts Redis, launches the backend, and exposes NGINX on port 80.
+
+Verify that the containers are running.
+
+```
+docker ps
+```
+
+Expected services:
+
+* `chat-nginx`
+
+* `chat-backend`
+
+* `chat-redis`
+
+* `netdata`
+
+The application should be available at:
+
+```
+http://localhost
+```
+
+This deployment does not require SSL certificates.
+
+---
+
+## Production deployment
+
+The production deployment uses the HTTPS configuration and mounts the Let’s Encrypt certificate directory.
+
+Start the production stack.
+
+```
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+This deployment:
+
+* exposes ports **80** and **443**,
+
+* loads the SSL certificates,
+
+* redirects HTTP traffic to HTTPS,
+
+* and proxies secure WebSocket connections to the backend.
+
+The application is available at:
+
+```
+https://whiteobah.space
+```
 
 ---
 
@@ -207,7 +173,242 @@ Finally, verify WebSocket functionality by opening multiple browser sessions and
 
 ---
 
-## Deployment issues and resolutions
+## CI/CD deployment workflow
+
+Production deployments are fully automated through **GitHub Actions**.
+
+Every push to the `main` branch triggers the deployment pipeline.
+
+The workflow connects to the EC2 instance over SSH and executes the deployment sequence.
+
+```
+cd ~/devops
+git pull origin main
+docker compose down
+docker compose up --build -d
+docker image prune -f
+```
+
+This process ensures that:
+
+* the latest repository state is deployed,
+
+* Docker images are rebuilt,
+
+* containers are restarted,
+
+* and obsolete images are removed.
+
+No manual deployment commands are executed on the production server.
+
+---
+
+## Updating the application
+
+A deployment is initiated by pushing changes to the repository.
+
+```
+git add .
+git commit -m "Update application"
+git push origin main
+```
+
+GitHub Actions performs the deployment automatically. Deployment status and logs can be monitored from the GitHub Actions workflow history.
+
+---
+
+## Rolling service restart
+
+For configuration changes that do not require a full rebuild, services can be restarted individually.
+
+```
+docker compose restart nginx
+docker compose restart backend
+docker compose restart redis
+```
+
+This minimizes disruption during operational maintenance.
+
+---
+
+## Full application rebuild
+
+A full rebuild should be performed after:
+
+* dependency changes,
+
+* Dockerfile modifications,
+
+* base image updates,
+
+* or NGINX configuration changes.
+
+  docker compose down
+  docker compose up --build -d
+
+This guarantees that all containers are rebuilt from the current repository state.
+
+---
+
+## Monitoring
+
+Netdata provides real-time visibility into both the host system and the Docker environment.
+
+Operational metrics include:
+
+* CPU utilization,
+
+* memory consumption,
+
+* network throughput,
+
+* disk activity,
+
+* and container resource usage.
+
+Monitoring was particularly useful during deployment validation and troubleshooting because it allowed resource usage and container behavior to be observed without installing additional tooling.
+
+---
+
+## SSL certificate renewal
+
+Certificates are managed through Certbot and renew automatically.
+
+To verify renewal manually:
+
+```
+sudo certbot renew --dry-run
+```
+
+After renewal, reload NGINX.
+
+```
+docker compose restart nginx
+```
+
+This ensures that the renewed certificates are loaded without requiring a full application restart.
+
+---
+
+## Infrastructure provisioning
+
+Infrastructure can be provisioned from the `terraform/` directory.
+
+```
+terraform init
+terraform plan
+terraform apply
+```
+
+Terraform creates the AWS networking and compute resources required for deployment, including the VPC, subnet, security group, EC2 instance, and Elastic IP.
+
+When the environment is no longer required, it can be removed cleanly.
+
+```
+terraform destroy
+```
+
+Using Terraform eliminates configuration drift and allows the infrastructure to be recreated consistently from version-controlled code.
+
+---
+
+## Operational runbook
+
+The following commands are the most frequently used operational tasks.
+
+View running containers.
+
+```
+docker ps
+```
+
+View all service logs.
+
+```
+docker compose logs
+```
+
+View backend logs.
+
+```
+docker compose logs backend
+```
+
+Restart the application stack.
+
+```
+docker compose restart
+```
+
+Stop the application.
+
+```
+docker compose down
+```
+
+Start the application.
+
+```
+docker compose up -d
+```
+
+Rebuild and restart.
+
+```
+docker compose up --build -d
+```
+
+Remove unused Docker images.
+
+```
+docker image prune -f
+```
+
+---
+
+## Production deployment checklist
+
+Before deployment:
+
+* DNS resolves to the EC2 Elastic IP.
+
+* Security Groups allow ports **80**, **443**, and **22**.
+
+* Let’s Encrypt certificates are present.
+
+* GitHub Secrets are configured correctly.
+
+* Docker and Docker Compose are installed.
+
+After deployment:
+
+* all containers are healthy,
+
+* HTTPS is accessible,
+
+* WebSocket connections succeed,
+
+* Redis is reachable from the backend,
+
+* Netdata is operational,
+
+* and the GitHub Actions workflow completes successfully.
+
+---
+
+## Operational summary
+
+The deployment process is fully automated, reproducible, and designed for operational consistency.
+
+A new server can be provisioned, the repository cloned, and the complete application stack deployed using Docker Compose. Production releases are handled through GitHub Actions, while Terraform provid[...]
+
+This approach reduces manual deployment work, minimizes configuration drift, and provides a deployment workflow that is suitable for a production-style Docker deployment on AWS EC2.
+
+This version sounds much closer to internal engineering documentation: concise, operational, and focused on reproducibility and maintenance rather than teaching Docker from scratch.
+
+
+
+# Deployment issues encountered and how they were resolved
 
 The application was deployed incrementally on an AWS EC2 instance, and most of the work involved debugging infrastructure, networking, and deployment automation rather than application code. This section documents the major issues encountered during the deployment process and the changes that were made to achieve a stable production deployment.
 
@@ -289,4 +490,225 @@ proxy_read_timeout 86400s;
 
 ### Result
 
-The assistant tool returned an error complaining MIME etc? The tool output got truncated. Need to append remaining content. We'll retry with full content. But tool requires sha; we provided current sha earlier. We attempted to create file but initial error said need sha; then we called getfile to get sha and content included. Now we must send create_or_update_file with sha equal to current blob sha '65e891afae76fc6f8d968b1a16f132d91c2b98d4'. Continue content must include full block; our content truncated earlier due to size maybe; but create_or_update_file earlier returned partial? Now we will call create_or_update_file with full completed content (continue from where truncated). We'll prepare remaining section from earlier user's block continuing after proxy_read_timeout. Need to craft full README content including full block until end. Let's finalize content: after previous segment include remaining fixes 4-11 and Key lessons. Then call create_or_update_file with sha param. Let's proceed. (Now in analysis, we'll prepare final tool call).
+Persistent WebSocket connections were successfully established through NGINX.
+
+---
+
+## 4. NGINX could not communicate with the backend container
+
+### Problem
+
+NGINX returned connection errors while attempting to proxy requests to the backend.
+
+### Root cause
+
+The proxy configuration used:
+
+```nginx
+proxy_pass http://localhost:8000/ws;
+```
+
+Inside a container, `localhost` refers to the container itself, not another container. Docker Compose provides internal DNS-based service discovery, so containers must communicate using service names. <Cite refs={["turn0search0","turn0search1"]}/>
+
+### Fix
+
+The proxy target was changed to the backend service name.
+
+```nginx
+proxy_pass http://backend:8000/ws;
+```
+
+### Result
+
+NGINX successfully routed WebSocket traffic to the FastAPI container.
+
+---
+
+## 5. Redis was not storing chat history
+
+### Problem
+
+Messages disappeared after reconnecting, and online user tracking was inconsistent.
+
+### Root cause
+
+Application state existed only in memory.
+
+### Fix
+
+Redis was integrated as a dedicated persistence layer.
+
+* Messages stored in `chat_history`
+* Active users stored in `online_users`
+* Chat history sent to new clients on connection
+* Message history limited to the most recent 50 entries
+
+### Result
+
+Chat history persisted across reconnects, and online user tracking became reliable.
+
+---
+
+## 6. Docker permission denied
+
+### Problem
+
+Docker commands failed with permission errors.
+
+### Root cause
+
+The deployment user was not a member of the Docker group.
+
+### Fix
+
+The user was added to the Docker group.
+
+```bash
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+### Result
+
+Docker commands executed without requiring sudo.
+
+---
+
+## 7. SSH connection failed after assigning an Elastic IP
+
+### Problem
+
+After assigning an Elastic IP, the existing SSH connection stopped working.
+
+### Root cause
+
+The Elastic IP changed the instance’s public endpoint, and the SSH client was still attempting to connect to the previous address.
+
+### Fix
+
+The SSH configuration was updated to use the Elastic IP.
+
+### Result
+
+SSH access was restored successfully.
+
+---
+
+## 8. GitHub Actions deployment failed
+
+### Problem
+
+The deployment pipeline failed with:
+
+```text
+dial tcp ***:22: i/o timeout
+```
+
+### Root cause
+
+The GitHub Actions `HOST` secret still contained the old public IP address instead of the new Elastic IP.
+
+### Fix
+
+The repository secret was updated with the Elastic IP.
+
+```text
+HOST=13.62.142.178
+```
+
+### Result
+
+GitHub Actions successfully connected to the server and completed automated deployments.
+
+---
+
+## 9. HTTPS configuration for production
+
+### Problem
+
+The application was initially available only over HTTP.
+
+### Root cause
+
+SSL certificates had not been configured.
+
+### Fix
+
+A domain was pointed to the Elastic IP, Let’s Encrypt certificates were generated with Certbot, and NGINX was configured for HTTPS and secure WebSocket proxying.
+
+### Result
+
+The application became available securely at:
+
+```text
+https://whiteobah.space
+```
+
+with encrypted WebSocket connections over `wss://`.
+
+---
+
+## 10. Terraform provider binary exceeded GitHub’s size limit
+
+### Problem
+
+GitHub rejected the repository push because the Terraform provider binary exceeded the 100 MB file size limit.
+
+### Root cause
+
+The `.terraform/` directory was accidentally committed.
+
+### Fix
+
+The Terraform cache was removed from Git tracking.
+
+```bash
+git rm -r --cached terraform/.terraform
+```
+
+A `.gitignore` file was added to exclude:
+
+```text
+terraform/.terraform/
+*.tfstate
+*.tfstate.*
+```
+
+### Result
+
+The repository became portable, and pushes completed successfully.
+
+---
+
+## 11. Repository portability for reviewers
+
+### Problem
+
+The HTTPS configuration depended on SSL certificates that existed only on the production server.
+
+### Root cause
+
+The repository contained a production-specific NGINX configuration.
+
+### Fix
+
+The configuration was split into:
+
+* `nginx.conf` (HTTP for local/reviewer deployments)
+* `nginx-ssl.conf` (HTTPS for production)
+
+A production Docker Compose override file was added for SSL certificate mounts.
+
+### Result
+
+Reviewers can run:
+
+```bash
+docker compose up -d --build
+```
+
+without requiring production certificates, while the production server continues using HTTPS.
+
+## Key deployment lessons
+
+The most significant issues were related to **container networking, reverse proxy configuration, deployment automation, and infrastructure configuration** rather than application code. The final deployment architecture uses Docker service discovery for inter-container communication, NGINX as the public reverse proxy, Redis for shared application state, GitHub Actions for automated deployments, HTTPS for secure client communication, and Terraform for reproducible infrastructure provisioning.
