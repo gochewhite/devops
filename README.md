@@ -209,56 +209,84 @@ Finally, verify WebSocket functionality by opening multiple browser sessions and
 
 ## Deployment issues and resolutions
 
-(see appended detailed section — contains root cause, fixes, and verification steps for each issue encountered during rollout)
+The application was deployed incrementally on an AWS EC2 instance, and most of the work involved debugging infrastructure, networking, and deployment automation rather than application code. This section documents the major issues encountered during the deployment process and the changes that were made to achieve a stable production deployment.
 
----
+## 1. Docker Compose configuration failure
 
-## Repository contents and bonus components
+### Problem
 
-The repository already contains the following optional/bonus components:
+The application failed to start with the error:
 
-- HTTPS: `nginx-ssl.conf` and `docker-compose.prod.yml` reference Let's Encrypt mounts for production.
-- Monitoring: `netdata` service is included in `docker-compose.yml` and exposes port 19999.
-- Redis: `redis` service is present and used by the backend for chat history and presence.
-- Infrastructure as Code: a `terraform/` directory exists with TF modules to provision AWS resources.
-
-Caveats found in the repo:
-- The `terraform/` directory currently contains generated state and a binary artifact that should not be tracked (`terraform.tfstate`, `terraform.tfstate.backup`, and an embedded Terraform binary). See cleanup steps below.
-
----
-
-## Cleanup / housekeeping (required actions)
-
-The repository contains generated Terraform artifacts that must be removed and ignored to keep the repo portable and within Git limits. Run the following on your workstation (one-time):
-
-```bash
-# from repo root
-# remove large or generated terraform artifacts from git history (local cleanup)
-git rm -r --cached terraform/.terraform || true
-git rm --cached terraform/terraform.tfstate terraform/terraform.tfstate.backup || true
-git rm --cached terraform/terraform_*.zip || true
-# commit the removal and add .gitignore
-git add .gitignore
-git commit -m "chore: remove terraform cache and provider artifacts from repo and ignore them"
-# push to origin
-git push origin main
+```text
+services.build must be a mapping
 ```
 
-I added a helper script `scripts/cleanup-terraform.sh` you can run locally to perform the above steps automatically (it requires your local git credentials).
+### Root cause
+
+The `docker-compose.yml` file had incorrect YAML indentation. The `build` directive was placed at the wrong level, so Docker Compose could not parse the service definition.
+
+### Fix
+
+The Compose file was restructured with proper indentation.
+
+```yaml
+services:
+  backend:
+    build: .
+```
+
+### Result
+
+Docker Compose successfully built the backend image and started all containers.
 
 ---
 
-## Recommended follow-ups
+## 2. NGINX served the default page instead of the application
 
-- Add a `healthcheck` for the backend service in `docker-compose.yml` so orchestrators can fail fast.
-- Implement a small GitHub Actions workflow that builds and validates `docker compose up` on PRs.
-- Move sensitive or environment-specific configuration into a `config` directory and load via env files that are not checked in.
+### Problem
+
+Accessing the server displayed the default NGINX page rather than the chat application.
+
+### Root cause
+
+The frontend directory was not mounted into the NGINX container.
+
+### Fix
+
+The frontend directory was mounted as a read-only volume.
+
+```yaml
+volumes:
+  - ./frontend:/usr/share/nginx/html:ro
+```
+
+### Result
+
+NGINX began serving the application frontend correctly.
 
 ---
 
-## Operational summary
+## 3. WebSocket connections failed through NGINX
 
-The deployment process prioritizes reproducibility and operational clarity. With the README additions and the housekeeping steps above, another engineer should be able to:
-- run the stack locally for review,
-- perform reproducible production deployments via GitHub Actions,
-- and maintain the infrastructure using Terraform after cleaning the repository state.
+### Problem
+
+The frontend loaded successfully, but real-time messaging did not work.
+
+### Root cause
+
+NGINX was proxying WebSocket requests as standard HTTP requests and was not forwarding the required upgrade headers.
+
+### Fix
+
+The reverse proxy configuration was updated.
+
+```nginx
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+proxy_read_timeout 86400s;
+```
+
+### Result
+
+The assistant tool returned an error complaining MIME etc? The tool output got truncated. Need to append remaining content. We'll retry with full content. But tool requires sha; we provided current sha earlier. We attempted to create file but initial error said need sha; then we called getfile to get sha and content included. Now we must send create_or_update_file with sha equal to current blob sha '65e891afae76fc6f8d968b1a16f132d91c2b98d4'. Continue content must include full block; our content truncated earlier due to size maybe; but create_or_update_file earlier returned partial? Now we will call create_or_update_file with full completed content (continue from where truncated). We'll prepare remaining section from earlier user's block continuing after proxy_read_timeout. Need to craft full README content including full block until end. Let's finalize content: after previous segment include remaining fixes 4-11 and Key lessons. Then call create_or_update_file with sha param. Let's proceed. (Now in analysis, we'll prepare final tool call).
