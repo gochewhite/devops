@@ -1,6 +1,6 @@
 # Deployment guide
 
-This repository is structured to support both **local development** and **production deployment**. The application stack is containerized with Docker Compose, fronted by NGINX, and deployed to an AWS [...]
+This repository is structured to support both **local development** and **production deployment**. The application stack is containerized with Docker Compose, fronted by NGINX, and deployed to an AWS EC2 instance.
 
 The deployment process was designed with three goals:
 
@@ -21,7 +21,7 @@ Two deployment profiles are maintained in the repository.
 | Local / Reviewer | `docker-compose.yml` + `nginx.conf`                                 |
 | Production       | `docker-compose.yml` + `docker-compose.prod.yml` + `nginx-ssl.conf` |
 
-The local configuration serves the application over HTTP and can be started without SSL certificates. The production configuration enables HTTPS using Let’s Encrypt and mounts the certificate direct[...]
+The local configuration serves the application over HTTP and can be started without SSL certificates. The production configuration enables HTTPS using Let’s Encrypt and mounts the certificate directory.
 
 This separation allows reviewers to run the application immediately while keeping production-specific configuration isolated from the default deployment.
 
@@ -243,8 +243,10 @@ A full rebuild should be performed after:
 
 * or NGINX configuration changes.
 
-  docker compose down
-  docker compose up --build -d
+```
+docker compose down
+docker compose up --build -d
+```
 
 This guarantees that all containers are rebuilt from the current repository state.
 
@@ -396,21 +398,61 @@ After deployment:
 
 ---
 
+## Load balancer architecture
+
+We recommend placing an AWS Application Load Balancer (ALB) in front of the EC2 fleet that runs this Docker Compose stack. Key points:
+
+* TLS termination: terminate TLS at the ALB using AWS Certificate Manager (ACM) when possible. This centralises certificate management and simplifies instance configuration.
+* Listeners and forwarding: create listeners on 80 (redirect to 443) and 443. The ALB forwards requests to a Target Group composed of the EC2 instances running the Docker stack.
+* WebSocket support: ALB supports WebSocket proxying over HTTP/1.1. Ensure the ALB and target group use HTTP/1.1 and that your NGINX proxy forwards Upgrade and Connection headers so WebSocket upgrades succeed.
+* Health checks: configure the target group health check to use a lightweight endpoint (for example `/health` or an NGINX status endpoint). Proper health checks allow the ALB to remove unhealthy instances automatically.
+* Security groups: restrict instance security groups to accept traffic from the ALB security group rather than the open internet. The ALB security group should allow inbound 80/443 from the internet.
+* Connection draining: enable deregistration delay (connection draining) on the target group so in-flight requests and long-lived WebSocket connections have time to finish when instances are removed.
+* Session/state handling: avoid relying on ALB sticky sessions for correctness. Instead, store transient state in Redis (ElastiCache) so any instance can serve any client. If stickiness is required for legacy reasons, enable target group stickiness, but prefer a shared-state architecture.
+
+If you choose to keep Let’s Encrypt/TLS on the instance-level NGINX, you can instead place a Network Load Balancer (NLB) in front of instances to perform TCP passthrough. Terminating TLS at the ALB with ACM is recommended for simplified management and better integration with AWS features.
+
+---
+
+## Auto-scaling approach
+
+Use an Auto Scaling Group (ASG) behind the ALB to provide horizontal scalability and improve availability. Recommended approach:
+
+* Launch configuration / AMI: create a Launch Template that uses a pre-baked AMI or runs user-data to install Docker, Docker Compose, and start the application (for example, `git pull && docker compose up -d --build`). Baking an AMI with Docker preinstalled speeds scale-out significantly.
+* Scaling policies:
+  - Target tracking: scale based on metrics such as ALBRequestCountPerTarget (requests per instance) or average CPU utilisation. Target tracking simplifies autoscaling by trying to keep the chosen metric near the target value.
+  - Step scaling: define step policies for larger spikes to add multiple instances quickly.
+  - Configure sensible min/max instance counts and cooldown periods so the group doesn't oscillate.
+* WebSocket and connection draining:
+  - Set a deregistration delay on the target group (for example 300s) so existing WebSocket connections and in-flight requests are gracefully handled during scale-in.
+  - Implement graceful shutdown handlers in containers so the process stops accepting new connections on SIGTERM and finishes processing open connections before exit.
+* Stateful vs stateless design:
+  - Keep application instances stateless by storing sessions, chat history, and presence data in Redis (ElastiCache) or another central store. This allows any instance to handle any client and simplifies scaling.
+  - For rate-limiting, locks, or leader election, use Redis or DynamoDB as shared coordination mechanisms.
+* Deployment and rollback:
+  - Use rolling updates where new instances are launched and pass health checks before older instances are deregistered.
+  - For safer releases, use blue/green deployments (create a new ASG and switch ALB target groups) or leverage AWS CodeDeploy for traffic shifting.
+* Observability and tuning:
+  - Monitor ALB metrics (RequestCount, TargetResponseTime, HealthyHostCount), EC2 metrics (CPU, memory), and application-level metrics (active WebSocket connections, message queue depth).
+  - Use CloudWatch alarms to trigger scale actions and log metrics to a central store for capacity planning.
+  - Start with conservative thresholds and iterate based on observed traffic patterns.
+
+---
+
 ## Operational summary
 
 The deployment process is fully automated, reproducible, and designed for operational consistency.
 
-A new server can be provisioned, the repository cloned, and the complete application stack deployed using Docker Compose. Production releases are handled through GitHub Actions, while Terraform provid[...]
+A new server can be provisioned, the repository cloned, and the complete application stack deployed using Docker Compose. Production releases are handled through GitHub Actions, while Terraform provides infrastructure-as-code for provisioning.
 
 This approach reduces manual deployment work, minimizes configuration drift, and provides a deployment workflow that is suitable for a production-style Docker deployment on AWS EC2.
 
 This version sounds much closer to internal engineering documentation: concise, operational, and focused on reproducibility and maintenance rather than teaching Docker from scratch.
 
 
-
 # Deployment issues encountered and how they were resolved
 
-The application was deployed incrementally on an AWS EC2 instance, and most of the work involved debugging infrastructure, networking, and deployment automation rather than application code. This section documents the major issues encountered during the deployment process and the changes that were made to achieve a stable production deployment.
+The application was deployed incrementally on an AWS EC2 instance, and most of the work involved debugging infrastructure, networking, and deployment automation rather than application code. This section records the main issues and their fixes.
 
 ## 1. Docker Compose configuration failure
 
@@ -508,7 +550,7 @@ The proxy configuration used:
 proxy_pass http://localhost:8000/ws;
 ```
 
-Inside a container, `localhost` refers to the container itself, not another container. Docker Compose provides internal DNS-based service discovery, so containers must communicate using service names. <Cite refs={["turn0search0","turn0search1"]}/>
+Inside a container, `localhost` refers to the container itself, not another container. Docker Compose provides internal DNS-based service discovery, so containers must communicate using service names.
 
 ### Fix
 
@@ -711,4 +753,4 @@ without requiring production certificates, while the production server continues
 
 ## Key deployment lessons
 
-The most significant issues were related to **container networking, reverse proxy configuration, deployment automation, and infrastructure configuration** rather than application code. The final deployment architecture uses Docker service discovery for inter-container communication, NGINX as the public reverse proxy, Redis for shared application state, GitHub Actions for automated deployments, HTTPS for secure client communication, and Terraform for reproducible infrastructure provisioning.
+The most significant issues were related to **container networking, reverse proxy configuration, deployment automation, and infrastructure configuration** rather than application code. The final deployment emphasizes stateless application design, automated deployments, and clear separation of local vs production configuration.
