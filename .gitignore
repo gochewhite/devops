@@ -1,0 +1,16 @@
+# Terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+
+# SSL certificates
+/etc/letsencrypt/
+
+# Environment files
+.env
+
+# Python
+__pycache__/
+*.pyc
