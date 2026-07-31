@@ -439,15 +439,6 @@ Use an Auto Scaling Group (ASG) behind the ALB to provide horizontal scalability
 
 ---
 
-## Operational summary
-
-The deployment process is fully automated, reproducible, and designed for operational consistency.
-
-A new server can be provisioned, the repository cloned, and the complete application stack deployed using Docker Compose. Production releases are handled through GitHub Actions, while Terraform provides infrastructure-as-code for provisioning.
-
-This approach reduces manual deployment work, minimizes configuration drift, and provides a deployment workflow that is suitable for a production-style Docker deployment on AWS EC2.
-
-This version sounds much closer to internal engineering documentation: concise, operational, and focused on reproducibility and maintenance rather than teaching Docker from scratch.
 
 
 # Deployment issues encountered and how they were resolved
