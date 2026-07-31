@@ -713,7 +713,7 @@ The repository became portable, and pushes completed successfully.
 
 ---
 
-## 11. Repository portability for reviewers
+## 11. Repository portability
 
 ### Problem
 
@@ -734,7 +734,7 @@ A production Docker Compose override file was added for SSL certificate mounts.
 
 ### Result
 
-Reviewers can run:
+can run:
 
 ```bash
 docker compose up -d --build
