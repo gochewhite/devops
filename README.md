@@ -742,6 +742,6 @@ docker compose up -d --build
 
 without requiring production certificates, while the production server continues using HTTPS.
 
-## Key deployment lessons
+## Key deployment
 
 The most significant issues were related to **container networking, reverse proxy configuration, deployment automation, and infrastructure configuration** rather than application code. The final deployment emphasizes stateless application design, automated deployments, and clear separation of local vs production configuration.
